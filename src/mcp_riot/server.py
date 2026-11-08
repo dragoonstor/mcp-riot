@@ -1,6 +1,7 @@
 from mcp.server.fastmcp import FastMCP
 import httpx
 import os
+import sys
 from typing import Any
 from dotenv import load_dotenv
 
@@ -12,11 +13,16 @@ RIOT_API_KEY = os.getenv("RIOT_API_KEY")
 if not RIOT_API_KEY:
     raise EnvironmentError("RIOT_API_KEY is not set in the environment variables.")
 
+# Platform routing (summoner, league, mastery): euw1, eun1, na1, kr, jp1, br1...
+RIOT_PLATFORM = os.getenv("RIOT_PLATFORM", "euw1")
+# Regional routing (account, match): europe, americas, asia, sea
+RIOT_REGION = os.getenv("RIOT_REGION", "europe")
+
 CHAMPION_MAP: dict[str, dict[int, str]] = {}  # language -> {champ_id: name}
 
 
 async def riot_request(
-    url: str, region: str = "kr", params: dict[str, Any] | None = None
+    url: str, region: str = RIOT_PLATFORM, params: dict[str, Any] | None = None
 ) -> dict[str, Any] | None:
     headers = {
         "X-Riot-Token": RIOT_API_KEY,
@@ -29,11 +35,11 @@ async def riot_request(
             res.raise_for_status()
             return res.json()
         except Exception as e:
-            print(f"Riot API Error: {e}")
+            print(f"Riot API Error: {e}", file=sys.stderr)
             return None
 
 
-async def get_champion_map(language: str = "ko_KR") -> dict[int, str]:
+async def get_champion_map(language: str = "en_US") -> dict[int, str]:
     if language in CHAMPION_MAP:
         return CHAMPION_MAP[language]
 
@@ -49,14 +55,14 @@ async def get_champion_map(language: str = "ko_KR") -> dict[int, str]:
 
 
 async def get_puuid(game_name: str, tag_line: str) -> str | None:
-    url = f"https://asia.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{game_name}/{tag_line}"
+    url = f"https://{RIOT_REGION}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{game_name}/{tag_line}"
     headers = {
         "X-Riot-Token": RIOT_API_KEY,
         "Content-Type": "application/json",
     }
     try:
         async with httpx.AsyncClient() as client:
-            res = await client.get(url, headers=headers)
+            res = await client.get(url, headers=headers, timeout=30.0)
             res.raise_for_status()
             return res.json()["puuid"]
     except Exception:
@@ -67,8 +73,8 @@ async def get_summoner_by_puuid(puuid: str) -> dict[str, Any] | None:
     return await riot_request(f"/lol/summoner/v4/summoners/by-puuid/{puuid}")
 
 
-async def get_rank_by_summoner_id(summoner_id: str) -> str:
-    rank_data = await riot_request(f"/lol/league/v4/entries/by-summoner/{summoner_id}")
+async def get_rank_by_puuid(puuid: str) -> str:
+    rank_data = await riot_request(f"/lol/league/v4/entries/by-puuid/{puuid}")
     if not rank_data:
         return "No ranked data available."
 
@@ -111,14 +117,14 @@ async def get_top_champions_tool(game_name: str, tag_line: str, language: str = 
 
 async def get_recent_matches(puuid: str, count: int = 3) -> str:
     match_ids = await riot_request(
-        f"/lol/match/v5/matches/by-puuid/{puuid}/ids", region="asia", params={"count": count}
+        f"/lol/match/v5/matches/by-puuid/{puuid}/ids", region=RIOT_REGION, params={"count": count}
     )
     if not match_ids:
         return "No recent matches found."
 
     matches = []
     for match_id in match_ids:
-        match = await riot_request(f"/lol/match/v5/matches/{match_id}", region="asia")
+        match = await riot_request(f"/lol/match/v5/matches/{match_id}", region=RIOT_REGION)
         if match:
             participant = next((p for p in match["info"]["participants"] if p["puuid"] == puuid), None)
             if participant:
@@ -192,7 +198,7 @@ async def get_player_summary(game_name: str, tag_line: str, language: str = "en_
         return "Failed to get summoner profile."
 
     level = summoner["summonerLevel"]
-    rank = await get_rank_by_summoner_id(summoner["id"])
+    rank = await get_rank_by_puuid(puuid)
     top_champs = await get_top_champions(puuid, champ_map, count=3)
     matches = await get_recent_matches(puuid)
 
@@ -215,7 +221,7 @@ async def get_match_summary(match_id: str, puuid: str) -> dict[str, Any] | str:
 
     Extracts and returns only the relevant stats (KDA, damage, vision, win/loss, etc.) from the match.
     """
-    match = await riot_request(f"/lol/match/v5/matches/{match_id}", region="asia")
+    match = await riot_request(f"/lol/match/v5/matches/{match_id}", region=RIOT_REGION)
     if not match:
         return "Failed to load match data."
 
@@ -244,6 +250,10 @@ async def get_match_summary(match_id: str, puuid: str) -> dict[str, Any] | str:
     }
 
 
-if __name__ == "__main__":
+def main() -> None:
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()
 
